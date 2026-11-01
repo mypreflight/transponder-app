@@ -42,6 +42,10 @@ export class GroundServicesFeed {
     this.report();
   }
 
+  running(): GroundService[] {
+    return this.status === 'connected' ? this.turnaround.running() : [];
+  }
+
   setOnGround(onGround: boolean): void {
     if (onGround) {
       this.airborne = false;

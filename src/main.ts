@@ -47,6 +47,7 @@ import { PositionQueue } from './domain/position-queue';
 import { RatePolicy } from './domain/rate-policy';
 import { PositionFeed } from './application/position.feed';
 import { GroundServicesFeed } from './application/ground-services.feed';
+import { GsxAutomation } from './application/gsx-automation';
 import { GsxClient } from './infrastructure/gsx/client';
 import { PresenceFeed } from './application/presence.feed';
 import {
@@ -142,6 +143,11 @@ async function bootstrap(): Promise<void> {
   );
 
   const groundFeed = new GroundServicesFeed(status, logger.child('gsx'));
+  const gsxAutomation = new GsxAutomation(
+    api,
+    () => groundFeed.running(),
+    logger.child('gsx'),
+  );
 
   if ((await tokenStore.read()) === null) {
     if (process.stdin.isTTY) {
@@ -242,6 +248,14 @@ async function bootstrap(): Promise<void> {
     }
   };
 
+  const refreshGsxSettings = async (): Promise<void> => {
+    try {
+      gsxAutomation.setSettings(await api.getGsxSettings());
+    } catch (error) {
+      logger.debug(`could not read the GSX settings: ${describeError(error)}`);
+    }
+  };
+
   const pollCurrentFlight = async (): Promise<void> => {
     try {
       const me = await api.getCurrentUser();
@@ -266,6 +280,15 @@ async function bootstrap(): Promise<void> {
       applyCallsign(flight?.callsign ?? null);
       applySchedule(flight?.status ?? null);
       groundFeed.setCurrentFlight(flight?.id ?? null);
+      gsxAutomation.setFlight(
+        flight === null ? null : { id: flight.id, status: flight.status },
+      );
+
+      if (flight !== null && config.gsx.enabled) {
+        await refreshGsxSettings();
+      }
+
+      await gsxAutomation.evaluate();
       status.set('api', 'connected');
       status.setFault('api', null);
     } catch (error) {
@@ -280,6 +303,7 @@ async function bootstrap(): Promise<void> {
         applyCallsign(null);
         applySchedule(null);
         groundFeed.setCurrentFlight(null);
+        gsxAutomation.setFlight(null);
       } else {
         status.set('api', 'disconnected');
         status.setFault('api', describeError(error));
@@ -489,7 +513,10 @@ async function bootstrap(): Promise<void> {
           { host: config.gsx.host, port: config.gsx.port },
           {
             onStatus: (gsxStatus) => groundFeed.setStatus(gsxStatus),
-            onServices: (services) => groundFeed.accept(services),
+            onServices: (services) => {
+              groundFeed.accept(services);
+              void gsxAutomation.evaluate();
+            },
             onStand: (stand) => groundFeed.setStand(stand),
           },
         ).run(signal),
