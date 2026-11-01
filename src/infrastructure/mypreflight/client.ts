@@ -223,14 +223,18 @@ export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
   }
 
   startBoarding(flightId: string): Promise<void> {
-    return this.startFromGsx(`/api/v1/flight/${flightId}/start-boarding`);
+    return this.postFromGsx(`/api/v1/flight/${flightId}/start-boarding`);
   }
 
   startOffboarding(flightId: string): Promise<void> {
-    return this.startFromGsx(`/api/v1/flight/${flightId}/start-offboarding`);
+    return this.postFromGsx(`/api/v1/flight/${flightId}/start-offboarding`);
   }
 
-  private async startFromGsx(path: string): Promise<void> {
+  finishOffboarding(flightId: string): Promise<void> {
+    return this.postFromGsx(`/api/v1/flight/${flightId}/finish-offboarding`);
+  }
+
+  private async postFromGsx(path: string): Promise<void> {
     const response = await this.authorizedRequest(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

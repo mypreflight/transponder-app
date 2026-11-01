@@ -11,7 +11,10 @@ export type GsxSettings = {
   autoDeboardingEnabled: boolean;
 };
 
-export type AutomatedService = Extract<ServiceId, 'boarding' | 'deboarding'>;
+export type GsxStep =
+  | 'start-boarding'
+  | 'start-offboarding'
+  | 'finish-offboarding';
 
 export const GSX_AUTOMATION_OFF: GsxSettings = {
   integrationEnabled: false,
@@ -19,32 +22,40 @@ export const GSX_AUTOMATION_OFF: GsxSettings = {
   autoDeboardingEnabled: false,
 };
 
-export function serviceToStart(
+export function stepToTake(
   services: GroundService[],
   status: FlightStatus | null,
   settings: GsxSettings,
-): AutomatedService | null {
+): GsxStep | null {
   if (!settings.integrationEnabled) {
     return null;
   }
 
-  const requested = (id: AutomatedService): boolean =>
+  const requested = (id: ServiceId): boolean =>
     services.some((service) => service.id === id && isRunning(service));
+  const completed = (id: ServiceId): boolean =>
+    services.some(
+      (service) => service.id === id && service.state === 'completed',
+    );
 
   if (
     settings.autoBoardingEnabled &&
     status === 'checked_in' &&
     requested('boarding')
   ) {
-    return 'boarding';
+    return 'start-boarding';
   }
 
-  if (
-    settings.autoDeboardingEnabled &&
-    status === 'on_block' &&
-    requested('deboarding')
-  ) {
-    return 'deboarding';
+  if (!settings.autoDeboardingEnabled) {
+    return null;
+  }
+
+  if (status === 'on_block' && requested('deboarding')) {
+    return 'start-offboarding';
+  }
+
+  if (status === 'offboarding_started' && completed('deboarding')) {
+    return 'finish-offboarding';
   }
 
   return null;

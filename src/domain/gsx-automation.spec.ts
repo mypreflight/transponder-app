@@ -3,7 +3,7 @@ import type { GroundService, ServiceId, ServiceState } from './ground-services';
 import {
   GSX_AUTOMATION_OFF,
   type GsxSettings,
-  serviceToStart,
+  stepToTake,
 } from './gsx-automation';
 
 function service(id: ServiceId, state: ServiceState | null): GroundService {
@@ -25,13 +25,13 @@ const ALL_ON: GsxSettings = {
   autoDeboardingEnabled: true,
 };
 
-describe('serviceToStart', () => {
+describe('stepToTake', () => {
   it.each<ServiceState>(['requested', 'performing'])(
     'starts boarding on a checked-in flight once GSX has it %s',
     (state) => {
       expect(
-        serviceToStart([service('boarding', state)], 'checked_in', ALL_ON),
-      ).toBe('boarding');
+        stepToTake([service('boarding', state)], 'checked_in', ALL_ON),
+      ).toBe('start-boarding');
     },
   );
 
@@ -39,8 +39,8 @@ describe('serviceToStart', () => {
     'starts deboarding on a flight on block once GSX has it %s',
     (state) => {
       expect(
-        serviceToStart([service('deboarding', state)], 'on_block', ALL_ON),
-      ).toBe('deboarding');
+        stepToTake([service('deboarding', state)], 'on_block', ALL_ON),
+      ).toBe('start-offboarding');
     },
   );
 
@@ -48,7 +48,7 @@ describe('serviceToStart', () => {
     'leaves boarding alone while GSX has it %s',
     (state) => {
       expect(
-        serviceToStart([service('boarding', state)], 'checked_in', ALL_ON),
+        stepToTake([service('boarding', state)], 'checked_in', ALL_ON),
       ).toBeNull();
     },
   );
@@ -61,7 +61,7 @@ describe('serviceToStart', () => {
     null,
   ])('does not start boarding on a flight that is %s', (status) => {
     expect(
-      serviceToStart([service('boarding', 'requested')], status, ALL_ON),
+      stepToTake([service('boarding', 'requested')], status, ALL_ON),
     ).toBeNull();
   });
 
@@ -73,7 +73,74 @@ describe('serviceToStart', () => {
     null,
   ])('does not start deboarding on a flight that is %s', (status) => {
     expect(
-      serviceToStart([service('deboarding', 'requested')], status, ALL_ON),
+      stepToTake([service('deboarding', 'requested')], status, ALL_ON),
+    ).toBeNull();
+  });
+
+  it('finishes offboarding once GSX has completed deboarding', () => {
+    expect(
+      stepToTake(
+        [service('deboarding', 'completed')],
+        'offboarding_started',
+        ALL_ON,
+      ),
+    ).toBe('finish-offboarding');
+  });
+
+  it.each<ServiceState | null>([
+    'requestable',
+    'requested',
+    'performing',
+    'bypassed',
+    null,
+  ])('leaves offboarding open while GSX has deboarding %s', (state) => {
+    expect(
+      stepToTake([service('deboarding', state)], 'offboarding_started', ALL_ON),
+    ).toBeNull();
+  });
+
+  it.each<FlightStatus | null>([
+    'taxiing_in',
+    'on_block',
+    'offboarding_finished',
+    'closed',
+    null,
+  ])('does not finish offboarding on a flight that is %s', (status) => {
+    expect(
+      stepToTake([service('deboarding', 'completed')], status, ALL_ON),
+    ).toBeNull();
+  });
+
+  it('takes finishing offboarding from the automatic deboarding switch', () => {
+    const completed = [service('deboarding', 'completed')];
+
+    expect(
+      stepToTake(completed, 'offboarding_started', {
+        ...ALL_ON,
+        autoDeboardingEnabled: false,
+      }),
+    ).toBeNull();
+    expect(
+      stepToTake(completed, 'offboarding_started', {
+        ...ALL_ON,
+        integrationEnabled: false,
+      }),
+    ).toBeNull();
+    expect(
+      stepToTake(completed, 'offboarding_started', {
+        ...ALL_ON,
+        autoBoardingEnabled: false,
+      }),
+    ).toBe('finish-offboarding');
+  });
+
+  it('never finishes boarding, because that needs the final loadsheet', () => {
+    expect(
+      stepToTake(
+        [service('boarding', 'completed')],
+        'boarding_started',
+        ALL_ON,
+      ),
     ).toBeNull();
   });
 
@@ -81,36 +148,28 @@ describe('serviceToStart', () => {
     const settings = { ...ALL_ON, integrationEnabled: false };
 
     expect(
-      serviceToStart(
-        [service('boarding', 'requested')],
-        'checked_in',
-        settings,
-      ),
+      stepToTake([service('boarding', 'requested')], 'checked_in', settings),
     ).toBeNull();
     expect(
-      serviceToStart(
-        [service('deboarding', 'requested')],
-        'on_block',
-        settings,
-      ),
+      stepToTake([service('deboarding', 'requested')], 'on_block', settings),
     ).toBeNull();
   });
 
   it('honours each automatic switch on its own', () => {
     expect(
-      serviceToStart([service('boarding', 'requested')], 'checked_in', {
+      stepToTake([service('boarding', 'requested')], 'checked_in', {
         ...ALL_ON,
         autoBoardingEnabled: false,
       }),
     ).toBeNull();
     expect(
-      serviceToStart([service('boarding', 'requested')], 'checked_in', {
+      stepToTake([service('boarding', 'requested')], 'checked_in', {
         ...ALL_ON,
         autoDeboardingEnabled: false,
       }),
-    ).toBe('boarding');
+    ).toBe('start-boarding');
     expect(
-      serviceToStart([service('deboarding', 'requested')], 'on_block', {
+      stepToTake([service('deboarding', 'requested')], 'on_block', {
         ...ALL_ON,
         autoDeboardingEnabled: false,
       }),
@@ -119,17 +178,13 @@ describe('serviceToStart', () => {
 
   it('ignores every other ground service', () => {
     expect(
-      serviceToStart(
-        [service('refueling', 'performing')],
-        'checked_in',
-        ALL_ON,
-      ),
+      stepToTake([service('refueling', 'performing')], 'checked_in', ALL_ON),
     ).toBeNull();
   });
 
   it('starts nothing with the settings it assumes before it has read any', () => {
     expect(
-      serviceToStart(
+      stepToTake(
         [service('boarding', 'requested')],
         'checked_in',
         GSX_AUTOMATION_OFF,

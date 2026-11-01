@@ -20,6 +20,7 @@ import type { Presence, PresenceWriter } from '../application/ports/presence';
 import { GsxClient } from '../infrastructure/gsx/client';
 import { GroundServicesFeed } from '../application/ground-services.feed';
 import { GsxAutomation } from '../application/gsx-automation';
+import type { FlightStatus } from '../domain/flight-status';
 import boarding from '../infrastructure/gsx/fixtures/services-boarding.json';
 
 const FLIGHT_ID = '0f0f6b04-9a5f-4e6c-9c4e-1d2f0f38a3b1';
@@ -630,8 +631,20 @@ describe('ADS-B service integration', () => {
   });
 });
 
-describe('starting boarding when GSX reports it', () => {
+describe('acting on the flight when GSX reports a step', () => {
   const START_BOARDING = `/api/v1/flight/${FLIGHT_ID}/start-boarding`;
+  const FINISH_OFFBOARDING = `/api/v1/flight/${FLIGHT_ID}/finish-offboarding`;
+
+  const withDeboarding = (state: string): unknown[] =>
+    boarding.value.map((service) => {
+      if (service.id === 'Deboarding') {
+        return { ...service, state };
+      }
+
+      return service.id === 'Boarding'
+        ? { ...service, state: 'completed' }
+        : service;
+    });
 
   let api: StubService;
   let settingsAnswer: { status: number; body?: unknown };
@@ -652,6 +665,7 @@ describe('starting boarding when GSX reports it', () => {
       }),
       'GET /api/v1/user/me/gsx-settings': () => settingsAnswer,
       [`POST ${START_BOARDING}`]: () => ({ status: 204 }),
+      [`POST ${FINISH_OFFBOARDING}`]: () => ({ status: 204 }),
     });
 
     await api.start();
@@ -661,7 +675,10 @@ describe('starting boarding when GSX reports it', () => {
     await api.stop();
   });
 
-  const fly = async (): Promise<void> => {
+  const fly = async (
+    status: FlightStatus = 'checked_in',
+    frames: unknown[][] = [boarding.value],
+  ): Promise<void> => {
     const flightTracker = new FlightTrackerClient(
       api.baseUrl,
       new InMemoryTokenStore(),
@@ -672,10 +689,10 @@ describe('starting boarding when GSX reports it', () => {
     const feed = new GroundServicesFeed(new StatusRegistry(), logger);
     const automation = new GsxAutomation(
       flightTracker,
-      () => feed.running(),
+      () => feed.services(),
       logger,
     );
-    automation.setFlight({ id: FLIGHT_ID, status: 'checked_in' });
+    automation.setFlight({ id: FLIGHT_ID, status });
     automation.setSettings(await flightTracker.getGsxSettings());
 
     const controller = new AbortController();
@@ -690,12 +707,22 @@ describe('starting boarding when GSX reports it', () => {
         open: () => {
           const socket = new StubGsx();
 
+          const pushFrom = (index: number): void => {
+            setImmediate(() => {
+              if (index === frames.length) {
+                socket.close();
+
+                return;
+              }
+
+              socket.push({ v: 1, type: 'snapshot', services: frames[index] });
+              pushFrom(index + 1);
+            });
+          };
+
           queueMicrotask(() => {
             socket.hello();
-            setImmediate(() => {
-              socket.push({ v: 1, type: 'snapshot', services: boarding.value });
-              setImmediate(() => socket.close());
-            });
+            pushFrom(0);
           });
 
           return socket;
@@ -727,6 +754,41 @@ describe('starting boarding when GSX reports it', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.authorization).toBe('Bearer access-1');
     expect(JSON.parse(requests[0]?.body ?? '')).toEqual({ source: 'gsx' });
+  });
+
+  it('finishes offboarding once GSX completes deboarding, even as GSX goes back to offering it', async () => {
+    await fly('offboarding_started', [
+      withDeboarding('performing'),
+      withDeboarding('completed'),
+      withDeboarding('available'),
+    ]);
+
+    const requests = api.requestsTo(FINISH_OFFBOARDING);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.authorization).toBe('Bearer access-1');
+    expect(JSON.parse(requests[0]?.body ?? '')).toEqual({ source: 'gsx' });
+  });
+
+  it('keeps offboarding open while GSX is still deboarding', async () => {
+    await fly('offboarding_started', [withDeboarding('performing')]);
+
+    expect(api.requestsTo(FINISH_OFFBOARDING)).toHaveLength(0);
+  });
+
+  it('keeps offboarding open while the pilot has automatic deboarding off', async () => {
+    settingsAnswer = {
+      status: 200,
+      body: {
+        integrationEnabled: true,
+        autoBoardingEnabled: true,
+        autoDeboardingEnabled: false,
+      },
+    };
+
+    await fly('offboarding_started', [withDeboarding('completed')]);
+
+    expect(api.requestsTo(FINISH_OFFBOARDING)).toHaveLength(0);
   });
 
   it('calls nothing while the pilot has automatic boarding off', async () => {

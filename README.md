@@ -140,8 +140,10 @@ installed the section simply never appears and nothing reports a fault.
 With the GSX integration turned on in your MyPreflight settings, the app also
 acts on what it reads: when you request boarding through GSX on a checked-in
 flight, it starts boarding in MyPreflight, and when you request deboarding once
-you have reported on block, it starts offboarding. Each has its own switch, and
-you can still start either yourself. Finishing them stays with you.
+you have reported on block, it starts offboarding, then finishes it when GSX
+completes deboarding. Boarding and deboarding each have their own switch, and you
+can still do any of these steps yourself. Finishing boarding stays with you,
+because it needs your final loadsheet.
 
 The app looks for GSX on this machine every twenty seconds, so starting GSX after
 the app, or restarting it mid-flight, is picked up on its own. It needs a GSX new
