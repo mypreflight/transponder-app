@@ -1,7 +1,9 @@
+import type { SignInCode } from '../../application/ports/device-sign-in';
 import {
   type Prompt,
   PromptCancelledError,
 } from '../../application/ports/prompt';
+import { bold } from './style';
 
 export type PromptInput = {
   on(event: 'data', listener: (chunk: string) => void): unknown;
@@ -38,20 +40,12 @@ export class ConsolePrompt implements Prompt {
   ) {}
 
   ask(question: string): Promise<string> {
-    return this.read(question, false);
-  }
-
-  askSecret(question: string): Promise<string> {
-    return this.read(question, true);
-  }
-
-  private read(question: string, hidden: boolean): Promise<string> {
     this.output.write(question);
 
     const typed: string[] = [];
     const buffered = this.pending;
     this.pending = '';
-    const fromBuffer = this.consume(typed, buffered, hidden);
+    const fromBuffer = this.consume(typed, buffered);
 
     if (fromBuffer.complete) {
       this.pending = fromBuffer.rest;
@@ -68,7 +62,7 @@ export class ConsolePrompt implements Prompt {
 
     return new Promise<string>((resolve, reject) => {
       const listener = (chunk: string): void => {
-        const result = this.consume(typed, chunk, hidden);
+        const result = this.consume(typed, chunk);
 
         if (!result.complete) {
           return;
@@ -90,7 +84,46 @@ export class ConsolePrompt implements Prompt {
     });
   }
 
-  private consume(typed: string[], chunk: string, hidden: boolean): Consumed {
+  showCode(code: SignInCode): void {
+    this.output.write(
+      [
+        '',
+        'Sign in to MyPreflight in your browser.',
+        '',
+        `  Open  ${code.verificationUri}`,
+        `  Code  ${bold(code.userCode)}`,
+        '',
+        'Approve only if the browser shows the same code. Ctrl+C cancels.',
+        '',
+        '',
+      ].join(LINE_FEED),
+    );
+  }
+
+  async cancellable<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const listener = (chunk: string): void => {
+      if (chunk.includes(CANCEL)) {
+        controller.abort();
+      }
+    };
+
+    this.pending = '';
+    this.input.setEncoding('utf-8');
+    this.input.setRawMode?.(true);
+    this.input.resume();
+    this.input.on('data', listener);
+
+    try {
+      return await work(controller.signal);
+    } finally {
+      this.input.off('data', listener);
+      this.input.setRawMode?.(false);
+      this.input.pause();
+    }
+  }
+
+  private consume(typed: string[], chunk: string): Consumed {
     for (let index = 0; index < chunk.length; index += 1) {
       const character = chunk[index] as string;
 
@@ -136,7 +169,7 @@ export class ConsolePrompt implements Prompt {
       }
 
       typed.push(character);
-      this.output.write(hidden ? '*' : character);
+      this.output.write(character);
     }
 
     return { complete: false, cancelled: false, rest: '' };

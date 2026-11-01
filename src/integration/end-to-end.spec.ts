@@ -1,6 +1,8 @@
 import { StubGsx, StubService } from './stub-services';
 import { SessionExpiredError } from '../application/ports/session';
 import { FlightTrackerClient } from '../infrastructure/mypreflight/client';
+import type { DeviceApproval } from '../application/ports/device-sign-in';
+import { signInThroughBrowser } from '../application/sign-in';
 import { InMemoryTokenStore } from '../infrastructure/mypreflight/token-store';
 import {
   PositionPublishFailedError,
@@ -24,6 +26,48 @@ import type { FlightStatus } from '../domain/flight-status';
 import boarding from '../infrastructure/gsx/fixtures/services-boarding.json';
 
 const FLIGHT_ID = '0f0f6b04-9a5f-4e6c-9c4e-1d2f0f38a3b1';
+
+const DEVICE_CODE = 'q0Hn8v1o3qGqWm7dJ9mP0xXcQe2yS5bWkT1uVfZrL4A';
+
+const USER_CODE = 'BCDF-GHJK';
+
+function jwt(claims: Record<string, unknown>): string {
+  const part = (value: unknown): string =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+
+  return `${part({ alg: 'ES256', typ: 'JWT' })}.${part(claims)}.c2lnbmF0dXJl`;
+}
+
+const REFRESH_CLAIMS = {
+  sub: 'a3c1f2d4-6b7e-4f8a-9c0d-1e2f3a4b5c6d',
+  session: 'f0e1d2c3-b4a5-4968-8776-655443322110',
+  type: 'refresh',
+};
+
+const REFRESH_TOKEN = jwt({ ...REFRESH_CLAIMS, client: 'transponder' });
+
+const PASSWORD_REFRESH_TOKEN = jwt(REFRESH_CLAIMS);
+
+const WEB_REFRESH_TOKEN = jwt({ ...REFRESH_CLAIMS, client: 'web' });
+
+function deviceAuthorization(baseUrl: string): Record<string, unknown> {
+  return {
+    deviceCode: DEVICE_CODE,
+    userCode: USER_CODE,
+    verificationUri: `${baseUrl}/activate`,
+    verificationUriComplete: `${baseUrl}/activate?code=${USER_CODE}`,
+    expiresIn: 600,
+    interval: 5,
+  };
+}
+
+async function signIn(flightTracker: FlightTrackerClient): Promise<void> {
+  const code = await flightTracker.startDeviceSignIn('SIM-PC');
+
+  await expect(flightTracker.pollDeviceSignIn(code.deviceCode)).resolves.toBe(
+    'approved',
+  );
+}
 
 const presencePayload = {
   state: 'Cruise, landing at 15:50 UTC',
@@ -80,7 +124,8 @@ function silentLogger(): Logger {
 describe('flight-tracker API integration', () => {
   let api: StubService;
   let presenceStatus = 200;
-  let signInStatus = 200;
+  let deviceStatus = 201;
+  let approval: DeviceApproval | 503 = 'approved';
   let flightBody: unknown;
   let statusBody: unknown;
   let refreshes = 0;
@@ -88,7 +133,8 @@ describe('flight-tracker API integration', () => {
 
   beforeEach(async () => {
     presenceStatus = 200;
-    signInStatus = 200;
+    deviceStatus = 201;
+    approval = 'approved';
     statusBody = undefined;
     flightBody = {
       id: FLIGHT_ID,
@@ -117,24 +163,82 @@ describe('flight-tracker API integration', () => {
     accessTokensIssued = 0;
 
     api = new StubService({
-      'POST /api/v1/auth/sign-in': () => {
-        if (signInStatus !== 200) {
-          return { status: signInStatus };
+      'POST /api/v1/auth/device': () =>
+        deviceStatus === 201
+          ? { status: 201, body: deviceAuthorization(api.baseUrl) }
+          : {
+              status: deviceStatus,
+              body: { statusCode: deviceStatus, error: 'Service Unavailable' },
+            },
+      [`POST /api/v1/auth/device/${USER_CODE}/approve`]: (request) => {
+        if (request.authorization !== 'Bearer web-access') {
+          return { status: 401 };
+        }
+
+        approval = 'approved';
+
+        return { status: 204 };
+      },
+      'POST /api/v1/auth/device/token': (request) => {
+        if (JSON.parse(request.body).deviceCode !== DEVICE_CODE) {
+          return { status: 404 };
+        }
+
+        if (approval === 'pending') {
+          return { status: 202, body: { status: 'pending' } };
+        }
+
+        if (approval === 'declined') {
+          return {
+            status: 403,
+            body: {
+              statusCode: 403,
+              error: 'Forbidden',
+              message: 'Device sign-in was declined.',
+            },
+          };
+        }
+
+        if (approval === 'expired') {
+          return {
+            status: 404,
+            body: {
+              statusCode: 404,
+              error: 'Not Found',
+              message: 'Device sign-in does not exist or has expired.',
+            },
+          };
+        }
+
+        if (approval === 503) {
+          return { status: 503 };
         }
 
         accessTokensIssued += 1;
+        approval = 'expired';
+
         return {
           status: 200,
           body: {
             accessToken: `access-${accessTokensIssued}`,
-            refreshToken: 'refresh-1',
+            refreshToken: REFRESH_TOKEN,
           },
         };
       },
+      'POST /api/v1/auth/sign-out': (request) =>
+        request.authorization?.startsWith('Bearer access-') === true
+          ? { status: 204 }
+          : { status: 401 },
       'POST /api/v1/auth/refresh': (request) => {
         refreshes += 1;
 
-        if (request.authorization !== 'Bearer refresh-1') {
+        const presented = request.authorization?.replace('Bearer ', '') ?? '';
+
+        if (
+          ![REFRESH_TOKEN, PASSWORD_REFRESH_TOKEN, WEB_REFRESH_TOKEN].includes(
+            presented,
+          )
+        ) {
           return { status: 401 };
         }
 
@@ -144,7 +248,7 @@ describe('flight-tracker API integration', () => {
           status: 200,
           body: {
             accessToken: `access-${accessTokensIssued}`,
-            refreshToken: 'refresh-1',
+            refreshToken: presented,
           },
         };
       },
@@ -190,9 +294,39 @@ describe('flight-tracker API integration', () => {
     );
   }
 
-  it('signs in and resolves the current flight callsign', async () => {
+  it('signs in through the browser and resolves the current flight callsign', async () => {
     const flightTracker = client();
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    const opened: string[] = [];
+    approval = 'pending';
+
+    const outcome = await signInThroughBrowser(
+      {
+        api: flightTracker,
+        browser: {
+          open: async (url) => {
+            opened.push(url);
+            const code = new URL(url).searchParams.get('code') ?? '';
+            const approved = await fetch(
+              `${api.baseUrl}/api/v1/auth/device/${code}/approve`,
+              {
+                method: 'POST',
+                headers: { Authorization: 'Bearer web-access' },
+              },
+            );
+
+            return approved.ok;
+          },
+        },
+        logger: silentLogger(),
+        deviceName: 'SIM-PC',
+        sleep: () => new Promise((resolve) => setTimeout(resolve, 5)),
+      },
+      () => undefined,
+      new AbortController().signal,
+    );
+
+    expect(outcome).toBe('signed-in');
+    expect(opened).toEqual([`${api.baseUrl}/activate?code=${USER_CODE}`]);
 
     const flight = await flightTracker.getCurrentFlight();
 
@@ -207,6 +341,128 @@ describe('flight-tracker API integration', () => {
     });
     expect(api.requestsTo('/api/v1/user/me')[0]?.authorization).toBe(
       'Bearer access-1',
+    );
+  });
+
+  it('asks for a code with no session, under the name of this machine', async () => {
+    await client().startDeviceSignIn('SIM-PC');
+
+    const request = api.requestsTo('/api/v1/auth/device')[0];
+
+    expect(request?.authorization).toBeUndefined();
+    expect(JSON.parse(request?.body ?? '')).toEqual({ deviceName: 'SIM-PC' });
+  });
+
+  it('cuts a long machine name down to what the API accepts', async () => {
+    await client().startDeviceSignIn(`  ${'X'.repeat(80)}  `);
+
+    expect(
+      JSON.parse(api.requestsTo('/api/v1/auth/device')[0]?.body ?? ''),
+    ).toEqual({ deviceName: 'X'.repeat(64) });
+  });
+
+  it('leaves out a machine name that is blank', async () => {
+    await client().startDeviceSignIn('   ');
+
+    expect(
+      JSON.parse(api.requestsTo('/api/v1/auth/device')[0]?.body ?? ''),
+    ).toEqual({});
+  });
+
+  it('reads the code, the addresses and the timing the API issued', async () => {
+    await expect(client().startDeviceSignIn('SIM-PC')).resolves.toEqual({
+      deviceCode: DEVICE_CODE,
+      userCode: USER_CODE,
+      verificationUri: `${api.baseUrl}/activate`,
+      verificationUriComplete: `${api.baseUrl}/activate?code=${USER_CODE}`,
+      expiresInSeconds: 600,
+      intervalSeconds: 5,
+    });
+  });
+
+  it('names the status when the API will not start a sign-in', async () => {
+    deviceStatus = 503;
+
+    await expect(client().startDeviceSignIn('SIM-PC')).rejects.toThrow(
+      'The API answered 503 to the sign-in.',
+    );
+  });
+
+  it('polls with the device code and no session', async () => {
+    approval = 'pending';
+
+    await client().pollDeviceSignIn(DEVICE_CODE);
+
+    const request = api.requestsTo('/api/v1/auth/device/token')[0];
+
+    expect(request?.authorization).toBeUndefined();
+    expect(JSON.parse(request?.body ?? '')).toEqual({
+      deviceCode: DEVICE_CODE,
+    });
+  });
+
+  it.each([
+    ['pending', 'pending'],
+    ['declined', 'declined'],
+    ['expired', 'expired'],
+  ] as const)('reads a %s sign-in as %s', async (state, answer) => {
+    approval = state;
+
+    await expect(client().pollDeviceSignIn(DEVICE_CODE)).resolves.toBe(answer);
+  });
+
+  it('throws on a server fault while polling, for the caller to retry', async () => {
+    approval = 503;
+
+    await expect(client().pollDeviceSignIn(DEVICE_CODE)).rejects.toThrow(
+      'The API answered 503 to the sign-in.',
+    );
+  });
+
+  it('keeps the refresh token only once the sign-in is approved', async () => {
+    const store = new InMemoryTokenStore();
+    const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
+    approval = 'pending';
+
+    await flightTracker.pollDeviceSignIn(DEVICE_CODE);
+    expect(await store.read()).toBeNull();
+
+    approval = 'approved';
+    await flightTracker.pollDeviceSignIn(DEVICE_CODE);
+
+    expect(await store.read()).toEqual({ refreshToken: REFRESH_TOKEN });
+  });
+
+  it('ends the session at the API when the pilot signs out', async () => {
+    const store = new InMemoryTokenStore();
+    const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
+    await signIn(flightTracker);
+
+    await expect(flightTracker.signOut()).resolves.toBe(true);
+
+    const request = api.requestsTo('/api/v1/auth/sign-out')[0];
+
+    expect(request?.method).toBe('POST');
+    expect(request?.authorization).toBe('Bearer access-1');
+    expect(await store.read()).toBeNull();
+  });
+
+  it('signs out on this PC even when the API cannot be reached', async () => {
+    const store = new InMemoryTokenStore();
+    const flightTracker = new FlightTrackerClient(
+      api.baseUrl,
+      store,
+      (input, init) =>
+        String(input).endsWith('/api/v1/auth/sign-out')
+          ? Promise.reject(new TypeError('fetch failed'))
+          : fetch(input, init),
+    );
+    await signIn(flightTracker);
+
+    await expect(flightTracker.signOut()).resolves.toBe(false);
+    expect(await store.read()).toBeNull();
+    await expect(flightTracker.getCurrentUser()).rejects.toThrow(
+      'No session is available',
     );
   });
 
@@ -239,7 +495,7 @@ describe('flight-tracker API integration', () => {
     };
 
     const flightTracker = client();
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     const flight = await flightTracker.getFlight(FLIGHT_ID);
 
@@ -258,7 +514,7 @@ describe('flight-tracker API integration', () => {
   it('renews with the refresh token as the bearer and no body', async () => {
     let clock = Date.UTC(2026, 7, 13, 12, 0, 0);
     const flightTracker = client(() => clock);
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     clock += 15 * 60 * 1000;
     await flightTracker.getCurrentFlight();
@@ -266,32 +522,16 @@ describe('flight-tracker API integration', () => {
     const refresh = api.requestsTo('/api/v1/auth/refresh')[0];
 
     expect(refreshes).toBe(1);
-    expect(refresh?.authorization).toBe('Bearer refresh-1');
+    expect(refresh?.authorization).toBe(`Bearer ${REFRESH_TOKEN}`);
     expect(refresh?.body).toBe('');
     expect(api.requestsTo('/api/v1/user/me')[0]?.authorization).toBe(
       'Bearer access-2',
     );
   });
 
-  it('blames the credentials when they are what was rejected', async () => {
-    signInStatus = 401;
-
-    await expect(client().signIn('pilot@example.com', 'wrong')).rejects.toThrow(
-      'That email and password were not accepted.',
-    );
-  });
-
-  it('names the status when the sign-in failed for some other reason', async () => {
-    signInStatus = 503;
-
-    await expect(
-      client().signIn('pilot@example.com', 'P@$$w0rd'),
-    ).rejects.toThrow('The API answered 503 to the sign-in.');
-  });
-
   it('reads the crew off the same request the flight id came from', async () => {
     const flightTracker = client();
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     await expect(flightTracker.getCurrentUser()).resolves.toEqual({
       name: 'Oskar Barcz',
@@ -309,7 +549,7 @@ describe('flight-tracker API integration', () => {
     };
 
     const flightTracker = client();
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     await expect(flightTracker.getFlight(FLIGHT_ID)).resolves.toEqual({
       id: FLIGHT_ID,
@@ -352,7 +592,13 @@ describe('flight-tracker API integration', () => {
 
   it('gives up on a session the API no longer accepts', async () => {
     const store = new InMemoryTokenStore();
-    await store.write({ refreshToken: 'stale' });
+    await store.write({
+      refreshToken: jwt({
+        ...REFRESH_CLAIMS,
+        session: 'b1a2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+        client: 'transponder',
+      }),
+    });
     const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
 
     await expect(flightTracker.getCurrentFlight()).rejects.toThrow(
@@ -361,9 +607,66 @@ describe('flight-tracker API integration', () => {
     expect(await store.read()).toBeNull();
   });
 
+  it('keeps a session the Transponder was issued, without asking the API', async () => {
+    const store = new InMemoryTokenStore();
+    await store.write({ refreshToken: REFRESH_TOKEN });
+    const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
+
+    await expect(flightTracker.storedSession()).resolves.toEqual({
+      refreshToken: REFRESH_TOKEN,
+    });
+    expect(await store.read()).toEqual({ refreshToken: REFRESH_TOKEN });
+    expect(api.requests).toEqual([]);
+  });
+
+  it.each([
+    ['the password sign-in, which names no client', PASSWORD_REFRESH_TOKEN],
+    ['the browser', WEB_REFRESH_TOKEN],
+  ])(
+    'drops a session issued to %s, and ends it at the API',
+    async (_issuer, refreshToken) => {
+      const store = new InMemoryTokenStore();
+      await store.write({ refreshToken });
+      const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
+
+      await expect(flightTracker.storedSession()).resolves.toBeNull();
+
+      expect(await store.read()).toBeNull();
+      expect(
+        api.requests.map((request) => [request.path, request.authorization]),
+      ).toEqual([
+        ['/api/v1/auth/refresh', `Bearer ${refreshToken}`],
+        ['/api/v1/auth/sign-out', 'Bearer access-1'],
+      ]);
+    },
+  );
+
+  it('drops a session it cannot read, even with the API unreachable', async () => {
+    const store = new InMemoryTokenStore();
+    await store.write({ refreshToken: 'not-a-token' });
+    const flightTracker = new FlightTrackerClient(api.baseUrl, store, () =>
+      Promise.reject(new TypeError('fetch failed')),
+    );
+
+    await expect(flightTracker.storedSession()).resolves.toBeNull();
+    expect(await store.read()).toBeNull();
+  });
+
+  it('never renews with a session the Transponder was not issued', async () => {
+    const store = new InMemoryTokenStore();
+    await store.write({ refreshToken: PASSWORD_REFRESH_TOKEN });
+    const flightTracker = new FlightTrackerClient(api.baseUrl, store, fetch);
+
+    await expect(flightTracker.getCurrentUser()).rejects.toThrow(
+      'No session is available',
+    );
+    expect(api.requestsTo('/api/v1/user/me')).toEqual([]);
+    expect(await store.read()).toBeNull();
+  });
+
   it('publishes the activity on a payload and clears it on no content', async () => {
     const flightTracker = client();
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     const writer = new RecordingWriter();
     const feed = new PresenceFeed(
@@ -659,7 +962,11 @@ describe('acting on the flight when GSX reports a step', () => {
       },
     };
     api = new StubService({
-      'POST /api/v1/auth/sign-in': () => ({
+      'POST /api/v1/auth/device': () => ({
+        status: 201,
+        body: deviceAuthorization(api.baseUrl),
+      }),
+      'POST /api/v1/auth/device/token': () => ({
         status: 200,
         body: { accessToken: 'access-1', refreshToken: 'refresh-1' },
       }),
@@ -683,7 +990,7 @@ describe('acting on the flight when GSX reports a step', () => {
       api.baseUrl,
       new InMemoryTokenStore(),
     );
-    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+    await signIn(flightTracker);
 
     const logger = new Logger('error', null, 'test', () => undefined);
     const feed = new GroundServicesFeed(new StatusRegistry(), logger);
@@ -938,3 +1245,100 @@ describe('reading a turnaround out of GSX and onto the dashboard', () => {
     expect(seen.at(-1)?.groundHandling).toBe('searching');
   });
 });
+
+const LIVE_API = process.env.E2E_API_BASE_URL?.replace(/\/+$/, '') ?? '';
+
+(LIVE_API === '' ? describe.skip : describe)(
+  'signing in against a running MyPreflight API',
+  () => {
+    const decide = async (
+      url: string,
+      decision: 'approve' | 'deny',
+    ): Promise<number> => {
+      const web = await fetch(`${LIVE_API}/api/v1/auth/sign-in`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'cabin-crew@example.com',
+          password: 'P@$$w0rd',
+        }),
+      });
+      const { accessToken } = (await web.json()) as { accessToken: string };
+      const code = new URL(url).searchParams.get('code') ?? '';
+      const decided = await fetch(
+        `${LIVE_API}/api/v1/auth/device/${encodeURIComponent(code)}/${decision}`,
+        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+
+      return decided.status;
+    };
+
+    const signInAs = async (
+      decision: 'approve' | 'deny',
+      store = new InMemoryTokenStore(),
+    ): Promise<{
+      outcome: string;
+      decisions: number[];
+      transponder: FlightTrackerClient;
+    }> => {
+      const transponder = new FlightTrackerClient(LIVE_API, store);
+      const decisions: Promise<number>[] = [];
+      const outcome = await signInThroughBrowser(
+        {
+          api: transponder,
+          browser: {
+            open: (url) => {
+              decisions.push(decide(url, decision));
+
+              return Promise.resolve(true);
+            },
+          },
+          logger: silentLogger(),
+          deviceName: 'transponder-e2e',
+        },
+        () => undefined,
+        AbortSignal.timeout(20_000),
+      );
+
+      return {
+        outcome,
+        decisions: await Promise.all(decisions),
+        transponder,
+      };
+    };
+
+    it('signs in through the browser and reads the pilot with the Transponder token', async () => {
+      const { outcome, decisions, transponder } = await signInAs('approve');
+
+      expect(decisions).toEqual([204]);
+      expect(outcome).toBe('signed-in');
+      await expect(transponder.getCurrentUser()).resolves.toMatchObject({
+        email: 'cabin-crew@example.com',
+      });
+    }, 30_000);
+
+    it('ends the session at the API when the pilot signs out', async () => {
+      const store = new InMemoryTokenStore();
+      const { outcome, transponder } = await signInAs('approve', store);
+      const session = await store.read();
+
+      expect(outcome).toBe('signed-in');
+      expect(session).not.toBeNull();
+      await expect(transponder.signOut()).resolves.toBe(true);
+
+      const stale = new InMemoryTokenStore();
+      await stale.write(session ?? { refreshToken: '' });
+
+      await expect(
+        new FlightTrackerClient(LIVE_API, stale).getCurrentUser(),
+      ).rejects.toThrow(SessionExpiredError);
+    }, 30_000);
+
+    it('stops when the pilot declines in the browser', async () => {
+      const { outcome, decisions } = await signInAs('deny');
+
+      expect(decisions).toEqual([204]);
+      expect(outcome).toBe('declined');
+    }, 30_000);
+  },
+);

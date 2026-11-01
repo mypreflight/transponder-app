@@ -85,18 +85,6 @@ describe('ConsolePrompt', () => {
     expect(output.written).toBe('email: abc\n');
   });
 
-  it('masks a secret instead of echoing it', async () => {
-    const input = new FakeInput();
-    const output = new FakeOutput();
-    const answer = new ConsolePrompt(input, output).askSecret('password: ');
-
-    input.type('hunter2\r');
-
-    expect(await answer).toBe('hunter2');
-    expect(output.written).toBe('password: *******\n');
-    expect(output.written).not.toContain('hunter2');
-  });
-
   it('accepts input arriving one character at a time', async () => {
     const input = new FakeInput();
     const answer = new ConsolePrompt(input, new FakeOutput()).ask('email: ');
@@ -150,25 +138,23 @@ describe('ConsolePrompt', () => {
   it('keeps what followed Enter for the next question', async () => {
     const input = new FakeInput();
     const prompt = new ConsolePrompt(input, new FakeOutput());
-    const email = prompt.ask('email: ');
+    const first = prompt.ask('first: ');
 
-    input.type('pilot@example.com\nhunter2\n');
+    input.type('one\ntwo\n');
 
-    expect(await email).toBe('pilot@example.com');
-    expect(await prompt.askSecret('password: ')).toBe('hunter2');
+    expect(await first).toBe('one');
+    expect(await prompt.ask('second: ')).toBe('two');
   });
 
   it('answers both questions from a single pasted chunk', async () => {
     const input = new FakeInput();
-    const output = new FakeOutput();
-    const prompt = new ConsolePrompt(input, output);
-    const email = prompt.ask('email: ');
+    const prompt = new ConsolePrompt(input, new FakeOutput());
+    const first = prompt.ask('first: ');
 
-    input.type('a@b.com\r\nhunter2\r\n');
+    input.type('one\r\ntwo\r\n');
 
-    expect(await email).toBe('a@b.com');
-    expect(await prompt.askSecret('password: ')).toBe('hunter2');
-    expect(output.written).not.toContain('hunter2');
+    expect(await first).toBe('one');
+    expect(await prompt.ask('second: ')).toBe('two');
   });
 
   it('treats a windows line ending as one Enter', async () => {
@@ -197,5 +183,85 @@ describe('ConsolePrompt', () => {
     input.type('\nb\r');
 
     expect(await second).toBe('b');
+  });
+
+  it('shows the address and the code to compare in the browser', () => {
+    const output = new FakeOutput();
+
+    process.env.NO_COLOR = '1';
+
+    try {
+      new ConsolePrompt(new FakeInput(), output).showCode({
+        userCode: 'BCDF-GHJK',
+        verificationUri: 'https://mypreflight.io/activate',
+      });
+    } finally {
+      delete process.env.NO_COLOR;
+    }
+
+    expect(output.written).toContain('Sign in to MyPreflight in your browser.');
+    expect(output.written).toContain('Open  https://mypreflight.io/activate');
+    expect(output.written).toContain('Code  BCDF-GHJK');
+    expect(output.written).toContain('Ctrl+C cancels.');
+  });
+
+  it('cancels the wait when the pilot presses ctrl-c', async () => {
+    const input = new FakeInput();
+    const prompt = new ConsolePrompt(input, new FakeOutput());
+    const seen: { signal: AbortSignal | null } = { signal: null };
+
+    const waiting = prompt.cancellable(
+      (signal) =>
+        new Promise<string>((resolve) => {
+          seen.signal = signal;
+          signal.addEventListener('abort', () => resolve('stopped'));
+        }),
+    );
+
+    input.type('x');
+    expect(seen.signal?.aborted).toBe(false);
+
+    input.type(CANCEL);
+
+    await expect(waiting).resolves.toBe('stopped');
+    expect(seen.signal?.aborted).toBe(true);
+  });
+
+  it('lets the wait end on its own without a key', async () => {
+    const input = new FakeInput();
+    const prompt = new ConsolePrompt(input, new FakeOutput());
+
+    await expect(prompt.cancellable(() => Promise.resolve(42))).resolves.toBe(
+      42,
+    );
+  });
+
+  it('leaves the terminal as it found it after the wait', async () => {
+    const input = new FakeInput();
+    const prompt = new ConsolePrompt(input, new FakeOutput());
+
+    await prompt
+      .cancellable(() => Promise.reject(new Error('boom')))
+      .catch(() => undefined);
+
+    expect(input.rawModes).toEqual([true, false]);
+    expect(input.paused).toBe(true);
+    expect(input.listening).toBe(false);
+  });
+
+  it('does not carry keys pressed while waiting into the next question', async () => {
+    const input = new FakeInput();
+    const prompt = new ConsolePrompt(input, new FakeOutput());
+    const first = prompt.ask('first: ');
+
+    input.type('a\rstale\r');
+    await first;
+
+    await prompt.cancellable(() => Promise.resolve());
+
+    const second = prompt.ask('second: ');
+    input.type('fresh\r');
+
+    expect(await second).toBe('fresh');
   });
 });

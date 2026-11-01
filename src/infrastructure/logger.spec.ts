@@ -4,6 +4,12 @@ import { join } from 'node:path';
 import { Logger, redact } from './logger';
 
 describe('redact', () => {
+  it('hides a device code, which is a credential until the sign-in ends', () => {
+    expect(redact('{"deviceCode":"8aPgRni6cPqzGUjmZPq29KO9"}')).toBe(
+      '{"deviceCode":"[redacted]"}',
+    );
+  });
+
   it('hides a bearer token', () => {
     expect(redact('Authorization: Bearer eyJhbGciOi.J9.abc-_123')).toBe(
       'Authorization: Bearer [redacted]',

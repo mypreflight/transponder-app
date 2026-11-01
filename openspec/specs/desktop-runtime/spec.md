@@ -6,14 +6,22 @@ tray, and enough diagnostics that a pilot can tell which of four connections is 
 ## Requirements
 ### Requirement: The pilot signs in once and the session is renewed unattended
 
-The system SHALL authenticate against `flight-tracker-api` with the pilot's credentials, keep
-only the resulting tokens, and renew the short-lived access token from the refresh token
-before it expires. The password SHALL NOT be stored. A refresh that fails because the session
-is gone SHALL leave the app running and prompt the pilot to sign in again.
+The system SHALL sign in to `flight-tracker-api` through the pilot's browser, with the device
+authorization flow: it asks the API for a code, shows the address and the code, opens the
+address in the default browser, and polls at the interval the API names until the pilot
+approves or declines there, or the code expires. The app SHALL NOT ask for, see or store a
+password. It SHALL keep only the resulting tokens, and renew the short-lived access token from
+the refresh token before it expires. A refresh that fails because the session is gone SHALL
+leave the app running and let the pilot start a new browser sign-in.
+
+The code SHALL be shown in full on screen so the pilot can compare it with the one the browser
+shows before approving. Opening the browser SHALL be best effort: when it fails, the printed
+address is the way in, and nothing else changes. The app SHALL send the machine's name, cut to
+what the API accepts, so the pilot can recognise the session later.
 
 Signing in SHALL be reachable for as long as the app is running, and not only in the moments
-before the dashboard takes the console. The outcome of an attempt SHALL be shown to the pilot
-rather than only written to the log file, and the password SHALL NOT be echoed.
+before the dashboard takes the console. The pilot SHALL be able to stop waiting at any time.
+The outcome of an attempt SHALL be shown to the pilot rather than only written to the log file.
 
 Where a session is already stored, the current flight SHALL be read as the app starts, and no
 slower start-up work SHALL be allowed to hold that reading up. The pilot SHALL also be able to
@@ -23,25 +31,42 @@ be picked up at once rather than at the next poll.
 #### Scenario: First run
 
 - **WHEN** the app starts with no stored session
-- **THEN** it prompts for sign-in and does not publish anything until it succeeds
+- **THEN** it shows the address and the code, opens the browser on them, and does not publish
+  anything until the pilot approves
 
-#### Scenario: The first attempt was declined or abandoned
+#### Scenario: The browser does not open
 
-- **WHEN** sign-in is cancelled, or fails every attempt, and the dashboard takes the console
-- **THEN** the app names the key that asks again, and pressing it prompts for the credentials
-  without the pilot restarting anything
+- **WHEN** the default browser cannot be started
+- **THEN** the address and the code stay on screen and the app keeps waiting for the approval
 
-#### Scenario: The password was mistyped
+#### Scenario: The pilot declines in the browser
 
-- **WHEN** the credentials are refused at the console prompt
-- **THEN** the pilot is asked again a small, bounded number of times before the app gives up and
-  hands over to the dashboard, rather than looping on the prompt forever
+- **WHEN** the API answers that the sign-in was declined
+- **THEN** the app stops polling at once and hands over to the dashboard, which names the key
+  that starts a new sign-in
+
+#### Scenario: The code expires
+
+- **WHEN** the code runs out before the pilot approves, or the API no longer knows it
+- **THEN** the app stops polling and offers a new code, which the pilot takes with Enter or
+  skips with Ctrl+C
+
+#### Scenario: The API cannot be reached while waiting
+
+- **WHEN** a poll fails on the network or with a server fault
+- **THEN** the app keeps polling at the same interval until the code expires
+
+#### Scenario: The pilot stops waiting
+
+- **WHEN** the pilot presses Ctrl+C at the console, or Esc on the dashboard, while a code is shown
+- **THEN** polling stops at once, and the dashboard names the key that starts a new sign-in
 
 #### Scenario: Signing in while the app is already running
 
-- **WHEN** the pilot signs in from the dashboard
-- **THEN** the current flight is looked up immediately rather than at the next poll, and the
-  result of the attempt is put in front of the pilot
+- **WHEN** the pilot starts a sign-in from the dashboard
+- **THEN** the dashboard shows the code and the address, the current flight is looked up as soon
+  as the pilot approves rather than at the next poll, and the result of the attempt is put in
+  front of the pilot
 
 #### Scenario: A session was already stored
 
@@ -62,8 +87,8 @@ be picked up at once rather than at the next poll.
 #### Scenario: The session was revoked
 
 - **WHEN** the refresh token is rejected
-- **THEN** the app clears the stored session, prompts for sign-in, clears the Discord
-  activity, and stops publishing positions
+- **THEN** the app clears the stored session, names the key that starts a new browser sign-in,
+  clears the Discord activity, and stops publishing positions
 
 ### Requirement: Secrets are held in the operating system credential store
 
@@ -191,13 +216,20 @@ fault, the message SHALL say what to do. A reason SHALL be cleared when the conn
 
 The system SHALL let the pilot end the session from the status view, and SHALL refuse to do so
 while the transponder is transmitting, showing that the action is unavailable rather than
-failing when it is used.
+failing when it is used. Signing out SHALL end the session at the API as well as on the PC, and
+SHALL still forget it on the PC when the API cannot be reached.
 
 #### Scenario: Signing out mid-flight
 
 - **WHEN** the pilot asks to sign out while position reports are being published
 - **THEN** nothing happens, and the action is shown as unavailable until transmission is
   switched off
+
+#### Scenario: Signing out with the API unreachable
+
+- **WHEN** the pilot signs out and the API does not answer
+- **THEN** the stored session is cleared anyway, and the log says the session was only
+  forgotten on this PC
 
 ### Requirement: The status view names the version at both ends and its own
 
@@ -316,8 +348,8 @@ working directory SHALL be used instead.
 #### Scenario: Carried on a stick
 
 - **WHEN** the folder is copied to another machine and the app is started
-- **THEN** it runs, and asks for the password again, because the credential store bound the
-  session to the Windows account that signed in
+- **THEN** it runs, and asks the pilot to sign in again in the browser, because the credential
+  store bound the session to the Windows account that signed in
 
 #### Scenario: The pilot wants the state somewhere else
 

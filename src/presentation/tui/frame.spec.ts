@@ -41,6 +41,15 @@ function signedIn(status: StatusRegistry): void {
   status.setCrew({ name: 'Oskar Barcz', email: 'pilot@example.com' });
 }
 
+function signingIn(status: StatusRegistry): void {
+  status.set('api', 'unauthorised');
+  status.setFault('api', 'not signed in; press s to sign in');
+  status.setSignIn({
+    userCode: 'BCDF-GHJK',
+    verificationUri: 'https://mypreflight.io/activate',
+  });
+}
+
 function onService(status: StatusRegistry): void {
   signedIn(status);
   status.setService({
@@ -138,6 +147,43 @@ describe('renderFrame', () => {
 
     expect(lines).toContain('not signed in');
     expect(lines).toContain('press s to sign in');
+  });
+
+  it('puts the code and the address in front of the pilot while signing in', () => {
+    const lines = plain(80, signingIn);
+
+    expect(lines).toContain(
+      'sign in — approve code BCDF-GHJK at https://mypreflight.io/activate',
+    );
+    expect(lines).toContain('waiting for the browser');
+  });
+
+  it('stops telling the pilot to press s once they are signing in', () => {
+    const lines = plain(80, signingIn);
+
+    expect(lines).not.toContain('press s to sign in');
+    expect(lines).not.toContain('[s] sign in');
+    expect(lines).toContain('[esc] cancel');
+  });
+
+  it('keeps every key on the line while signing in, with the log open', () => {
+    const line = plain(80, signingIn, [], true).split('\n').at(-1) ?? '';
+
+    expect(line).toContain('[d] hide debug');
+    expect(line.trimEnd().length).toBeLessThanOrEqual(80);
+  });
+
+  it('keeps a long sign-in address whole by wrapping it', () => {
+    const lines = plain(60, (status) => {
+      signingIn(status);
+      status.setSignIn({
+        userCode: 'BCDF-GHJK',
+        verificationUri: 'https://staging.mypreflight.io/activate',
+      });
+    });
+
+    expect(lines).toContain('BCDF-GHJK');
+    expect(lines).toContain('https://staging.mypreflight.io/activate');
   });
 
   it('reads the current service as callsign, route, airframe and tail', () => {

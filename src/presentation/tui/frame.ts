@@ -148,10 +148,18 @@ function pair(
 function crew(status: StatusSnapshot): (width: number) => string[] {
   const { crew: member } = status;
 
-  return box('1 CREW', [
-    member === null ? dim('not signed in') : bold(member.name),
-    member === null ? dim('press s to sign in') : member.email,
-  ]);
+  if (member === null) {
+    return box('1 CREW', [
+      dim('not signed in'),
+      dim(
+        status.signIn === null
+          ? 'press s to sign in'
+          : 'waiting for the browser',
+      ),
+    ]);
+  }
+
+  return box('1 CREW', [bold(member.name), member.email]);
 }
 
 function currentService(status: StatusSnapshot): (width: number) => string[] {
@@ -448,7 +456,9 @@ function hint(input: FrameInput): string {
     signedIn
       ? // Signing out mid-transmission would strand a flight halfway through
         key('s', 'sign out', !status.transmitting)
-      : key('s', 'sign in'),
+      : status.signIn === null
+        ? key('s', 'sign in')
+        : key('esc', 'cancel'),
     key('t', 'xpndr mode'),
     key('c', 'callsign'),
     key('r', 'refresh'),
@@ -479,13 +489,28 @@ function notices(
 ): string[] {
   const blocks: string[][] = [];
 
+  if (status.signIn !== null) {
+    blocks.push(
+      annotation(
+        cyan('>'),
+        'sign in',
+        `approve code ${status.signIn.userCode} at ${status.signIn.verificationUri}`,
+        width,
+      ),
+    );
+  }
+
   if (status.storageFault !== null) {
     blocks.push(
       annotation(reverse(red('!')), 'storage', status.storageFault, width),
     );
   }
 
-  const name = FAULT_ORDER.find((each) => status.faults[each] !== null);
+  const name = FAULT_ORDER.find(
+    (each) =>
+      status.faults[each] !== null &&
+      !(each === 'api' && status.signIn !== null),
+  );
 
   if (name !== undefined) {
     blocks.push(

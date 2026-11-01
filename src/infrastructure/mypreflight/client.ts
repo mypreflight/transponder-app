@@ -1,3 +1,8 @@
+import type {
+  DeviceApproval,
+  DeviceCode,
+  DeviceSignIn,
+} from '../../application/ports/device-sign-in';
 import type { FlightLifecycle } from '../../application/ports/flight-lifecycle';
 import type {
   Presence,
@@ -9,7 +14,8 @@ import {
 } from '../../application/ports/session';
 import { type FlightStatus, toFlightStatus } from '../../domain/flight-status';
 import type { GsxSettings } from '../../domain/gsx-automation';
-import type { TokenStore } from './token-store';
+import { isTransponderToken } from './session-token';
+import type { StoredSession, TokenStore } from './token-store';
 
 export type Airport = {
   iata: string | null;
@@ -33,13 +39,9 @@ export type CurrentUser = {
   currentFlightId: string | null;
 };
 
-export class SignInRejectedError extends Error {
+export class SignInFailedError extends Error {
   constructor(status: number) {
-    super(
-      status === 401 || status === 403
-        ? 'That email and password were not accepted.'
-        : `The API answered ${status} to the sign-in.`,
-    );
+    super(`The API answered ${status} to the sign-in.`);
   }
 }
 
@@ -55,11 +57,21 @@ const VERSION_TIMEOUT_MS = 20_000;
 
 const STATUS_TIMEOUT_MS = 4_000;
 
+const SIGN_IN_TIMEOUT_MS = 10_000;
+
+const SIGN_OUT_TIMEOUT_MS = 5_000;
+
+const MAX_DEVICE_NAME = 64;
+
+const DEFAULT_POLL_INTERVAL_SECONDS = 5;
+
 const DEPARTURE = 'departure';
 
 const DESTINATION = 'destination';
 
-export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
+export class FlightTrackerClient
+  implements PresenceSource, FlightLifecycle, DeviceSignIn
+{
   private accessToken: string | null = null;
   private accessTokenExpiresAt = 0;
 
@@ -70,21 +82,66 @@ export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  async signIn(email: string, password: string): Promise<void> {
+  async startDeviceSignIn(
+    deviceName: string,
+    signal?: AbortSignal,
+  ): Promise<DeviceCode> {
+    const name = deviceName.trim().slice(0, MAX_DEVICE_NAME).trim();
     const response = await this.fetchImpl(
-      `${this.baseUrl}/api/v1/auth/sign-in`,
+      `${this.baseUrl}/api/v1/auth/device`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(name === '' ? {} : { deviceName: name }),
+        signal: withTimeout(signal, SIGN_IN_TIMEOUT_MS),
       },
     );
 
     if (!response.ok) {
-      throw new SignInRejectedError(response.status);
+      await discard(response);
+      throw new SignInFailedError(response.status);
     }
 
-    await this.acceptTokens((await response.json()) as TokenPair);
+    return toDeviceCode(await response.json());
+  }
+
+  async pollDeviceSignIn(
+    deviceCode: string,
+    signal?: AbortSignal,
+  ): Promise<DeviceApproval> {
+    const response = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/auth/device/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceCode }),
+        signal: withTimeout(signal, SIGN_IN_TIMEOUT_MS),
+      },
+    );
+
+    if (response.status !== 200) {
+      await discard(response);
+    }
+
+    if (response.status === 202) {
+      return 'pending';
+    }
+
+    if (response.status === 403) {
+      return 'declined';
+    }
+
+    if (response.status === 404) {
+      return 'expired';
+    }
+
+    if (response.status !== 200) {
+      throw new SignInFailedError(response.status);
+    }
+
+    await this.acceptTokens(toTokenPair(await response.json()));
+
+    return 'approved';
   }
 
   async version(): Promise<string> {
@@ -136,10 +193,75 @@ export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
     return version;
   }
 
-  async signOut(): Promise<void> {
+  async signOut(): Promise<boolean> {
+    let revoked: boolean;
+
+    try {
+      revoked = await this.revokeSession();
+    } catch (error) {
+      revoked =
+        error instanceof NotSignedInError ||
+        error instanceof SessionExpiredError;
+    }
+
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
     await this.tokenStore.clear();
+
+    return revoked;
+  }
+
+  private async revokeSession(): Promise<boolean> {
+    const response = await this.authorizedRequest('/api/v1/auth/sign-out', {
+      method: 'POST',
+      signal: AbortSignal.timeout(SIGN_OUT_TIMEOUT_MS),
+    });
+
+    await discard(response);
+
+    return response.ok;
+  }
+
+  async storedSession(): Promise<StoredSession | null> {
+    const session = await this.tokenStore.read();
+
+    if (session === null || isTransponderToken(session.refreshToken)) {
+      return session;
+    }
+
+    await this.tokenStore.clear();
+    await this.endForeignSession(session.refreshToken).catch(() => undefined);
+
+    return null;
+  }
+
+  private async endForeignSession(refreshToken: string): Promise<void> {
+    const refreshed = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/auth/refresh`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${refreshToken}` },
+        signal: AbortSignal.timeout(SIGN_OUT_TIMEOUT_MS),
+      },
+    );
+
+    if (!refreshed.ok) {
+      await discard(refreshed);
+
+      return;
+    }
+
+    const { accessToken } = toTokenPair(await refreshed.json());
+    const response = await this.fetchImpl(
+      `${this.baseUrl}/api/v1/auth/sign-out`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(SIGN_OUT_TIMEOUT_MS),
+      },
+    );
+
+    await discard(response);
   }
 
   async getCurrentUser(): Promise<CurrentUser> {
@@ -291,7 +413,7 @@ export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
       return;
     }
 
-    const session = await this.tokenStore.read();
+    const session = await this.storedSession();
 
     if (session === null) {
       throw new NotSignedInError();
@@ -319,6 +441,67 @@ export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
     this.accessTokenExpiresAt = this.now() + ACCESS_TOKEN_LIFETIME_MS;
     await this.tokenStore.write({ refreshToken: tokens.refreshToken });
   }
+}
+
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+}
+
+async function discard(response: Response): Promise<void> {
+  await response.text().catch(() => undefined);
+}
+
+function toDeviceCode(value: unknown): DeviceCode {
+  const body = record(value);
+  const deviceCode = text(body.deviceCode);
+  const userCode = text(body.userCode);
+  const verificationUri = text(body.verificationUri);
+  const expiresInSeconds = positive(body.expiresIn);
+
+  if (
+    deviceCode === null ||
+    userCode === null ||
+    verificationUri === null ||
+    expiresInSeconds === null
+  ) {
+    throw new Error('the API started a sign-in without a usable code');
+  }
+
+  return {
+    deviceCode,
+    userCode,
+    verificationUri,
+    verificationUriComplete:
+      text(body.verificationUriComplete) ?? verificationUri,
+    expiresInSeconds,
+    intervalSeconds: positive(body.interval) ?? DEFAULT_POLL_INTERVAL_SECONDS,
+  };
+}
+
+function toTokenPair(value: unknown): TokenPair {
+  const body = record(value);
+  const accessToken = text(body.accessToken);
+  const refreshToken = text(body.refreshToken);
+
+  if (accessToken === null || refreshToken === null) {
+    throw new Error('the API approved the sign-in without tokens');
+  }
+
+  return { accessToken, refreshToken };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function positive(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
 function text(value: unknown): string | null {

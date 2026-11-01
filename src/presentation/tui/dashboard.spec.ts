@@ -7,6 +7,11 @@ const CANCEL = '\u0003';
 const ESCAPE = '\u001b';
 const BACKSPACE = '\u007f';
 
+const WAITING = {
+  userCode: 'BCDF-GHJK',
+  verificationUri: 'https://mypreflight.io/activate',
+};
+
 class FakeOutput {
   written: string[] = [];
 
@@ -89,6 +94,7 @@ function handlers(
     onQuit: () => undefined,
     onCallsign: () => undefined,
     onSignIn: () => undefined,
+    onCancelSignIn: () => undefined,
     onSignOut: () => undefined,
     onTransmit: () => undefined,
     onRefresh: () => undefined,
@@ -361,77 +367,8 @@ describe('Dashboard', () => {
     expect(out.all).toContain('[?1049l');
   });
 
-  it('asks for an email and then a masked password on s', () => {
+  it('starts the browser sign-in on s when nobody is signed in', () => {
     const { out, input, view } = dashboard();
-    const attempts: [string, string][] = [];
-
-    view.start(
-      handlers({
-        onSignIn: (email, password) => attempts.push([email, password]),
-      }),
-    );
-
-    input.press('s');
-    expect(out.all).toContain('email ›');
-
-    type(input, 'pilot@example.com');
-    input.press('\r');
-    out.written = [];
-
-    type(input, 'P@$$w0rd');
-    const asking = out.all;
-    input.press('\r');
-    view.stop();
-
-    expect(asking).toContain('password ›');
-    expect(asking).not.toContain('P@$$w0rd');
-    expect(asking).toContain('*'.repeat('P@$$w0rd'.length));
-    expect(attempts).toEqual([['pilot@example.com', 'P@$$w0rd']]);
-  });
-
-  it('never trims a password, and never writes one to the frame', () => {
-    const { out, input, view } = dashboard();
-    const attempts: [string, string][] = [];
-
-    view.start(
-      handlers({
-        onSignIn: (email, password) => attempts.push([email, password]),
-      }),
-    );
-
-    input.press('s');
-    type(input, '  pilot@example.com  ');
-    input.press('\r');
-    type(input, ' spaced ');
-    input.press('\r');
-    view.stop();
-
-    expect(attempts).toEqual([['pilot@example.com', ' spaced ']]);
-    expect(out.all).not.toContain('spaced');
-  });
-
-  it('lets a password with an accent in it be typed at all', () => {
-    const { input, view } = dashboard();
-    const attempts: [string, string][] = [];
-
-    view.start(
-      handlers({
-        onSignIn: (email, password) => attempts.push([email, password]),
-      }),
-    );
-
-    input.press('s');
-    type(input, 'pilot@example.com');
-    input.press('\r');
-    type(input, 'grüß');
-    input.press('\r');
-    view.stop();
-
-    expect(attempts).toEqual([['pilot@example.com', 'grüß']]);
-  });
-
-  it('abandons the sign-in when the email is left empty', () => {
-    const { input, view } = dashboard();
     let asked = 0;
 
     view.start(
@@ -441,35 +378,112 @@ describe('Dashboard', () => {
         },
       }),
     );
+    out.written = [];
 
     input.press('s');
-    input.press('\r');
-    input.press('\r');
+    view.stop();
+
+    expect(asked).toBe(1);
+    expect(out.all).not.toContain('›');
+  });
+
+  it('does not start a second sign-in while one is waiting for the browser', () => {
+    const { input, status, view } = dashboard();
+    let asked = 0;
+
+    status.setSignIn(WAITING);
+    view.start(
+      handlers({
+        onSignIn: () => {
+          asked += 1;
+        },
+      }),
+    );
+
+    input.press('s');
     view.stop();
 
     expect(asked).toBe(0);
   });
 
-  it('lets escape out of the password without signing in', () => {
-    const { input, view } = dashboard();
+  it('signs out on s once signed in', () => {
+    const { input, status, view } = dashboard();
     let asked = 0;
 
+    status.setCrew({ name: 'Oskar Barcz', email: 'pilot@example.com' });
     view.start(
       handlers({
-        onSignIn: () => {
+        onSignOut: () => {
           asked += 1;
         },
       }),
     );
 
     input.press('s');
-    type(input, 'pilot@example.com');
-    input.press('\r');
-    type(input, 'secret');
+    view.stop();
+
+    expect(asked).toBe(1);
+  });
+
+  it('lets escape cancel a sign-in waiting for the browser', () => {
+    const { input, status, view } = dashboard();
+    let cancelled = 0;
+
+    status.setSignIn(WAITING);
+    view.start(
+      handlers({
+        onCancelSignIn: () => {
+          cancelled += 1;
+        },
+      }),
+    );
+
     input.press(ESCAPE);
     view.stop();
 
-    expect(asked).toBe(0);
+    expect(cancelled).toBe(1);
+  });
+
+  it('takes ctrl-c as cancelling the sign-in rather than quitting', () => {
+    const { input, status, view } = dashboard();
+    let cancelled = 0;
+    let quit = 0;
+
+    status.setSignIn(WAITING);
+    view.start(
+      handlers({
+        onCancelSignIn: () => {
+          cancelled += 1;
+        },
+        onQuit: () => {
+          quit += 1;
+        },
+      }),
+    );
+
+    input.press(CANCEL);
+    view.stop();
+
+    expect(cancelled).toBe(1);
+    expect(quit).toBe(0);
+  });
+
+  it('ignores escape when no sign-in is waiting', () => {
+    const { input, view } = dashboard();
+    let cancelled = 0;
+
+    view.start(
+      handlers({
+        onCancelSignIn: () => {
+          cancelled += 1;
+        },
+      }),
+    );
+
+    input.press(ESCAPE);
+    view.stop();
+
+    expect(cancelled).toBe(0);
   });
 
   it('asks to toggle transmission on t', () => {
@@ -560,7 +574,7 @@ describe('Dashboard', () => {
     const { out, view } = dashboard();
 
     view.start(handlers());
-    view.append('sign-in failed: wrong password');
+    view.append('sign-in declined in the browser');
     out.written = [];
 
     view.revealLogs();
@@ -571,7 +585,7 @@ describe('Dashboard', () => {
     view.revealLogs();
     view.stop();
 
-    expect(revealed).toContain('sign-in failed');
+    expect(revealed).toContain('sign-in declined');
     expect(out.all).toContain('and here is why');
   });
 
