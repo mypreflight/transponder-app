@@ -42,8 +42,8 @@ export class GroundServicesFeed {
     this.report();
   }
 
-  running(): GroundService[] {
-    return this.status === 'connected' ? this.turnaround.running() : [];
+  services(): GroundService[] {
+    return this.status === 'connected' ? this.turnaround.snapshot() : [];
   }
 
   setOnGround(onGround: boolean): void {

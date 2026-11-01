@@ -54,6 +54,11 @@ function setup(): {
 
       return this.fail === null ? Promise.resolve() : Promise.reject(this.fail);
     },
+    finishOffboarding(flightId: string): Promise<void> {
+      calls.push(`finish offboarding ${flightId}`);
+
+      return this.fail === null ? Promise.resolve() : Promise.reject(this.fail);
+    },
   };
   const logger = {
     debug: () => undefined,
@@ -101,6 +106,61 @@ describe('GsxAutomation', () => {
     await automation.evaluate();
 
     expect(calls).toEqual([`offboarding ${FLIGHT_ID}`]);
+  });
+
+  it('finishes offboarding when GSX has completed deboarding', async () => {
+    const { automation, calls, logs, gsx } = setup();
+    automation.setSettings(ALL_ON);
+    automation.setFlight({ id: FLIGHT_ID, status: 'offboarding_started' });
+    gsx.running = [service('deboarding', 'completed')];
+
+    await automation.evaluate();
+
+    expect(calls).toEqual([`finish offboarding ${FLIGHT_ID}`]);
+    expect(logs).toEqual(['offboarding finished, as GSX completed deboarding']);
+  });
+
+  it('follows a whole deboarding, one call per step', async () => {
+    const { automation, calls, gsx } = setup();
+    automation.setSettings(ALL_ON);
+    automation.setFlight({ id: FLIGHT_ID, status: 'on_block' });
+    gsx.running = [service('deboarding', 'requested')];
+    await automation.evaluate();
+
+    automation.setFlight({ id: FLIGHT_ID, status: 'offboarding_started' });
+    gsx.running = [service('deboarding', 'performing')];
+    await automation.evaluate();
+
+    gsx.running = [service('deboarding', 'completed')];
+    await automation.evaluate();
+    await automation.evaluate();
+
+    expect(calls).toEqual([
+      `offboarding ${FLIGHT_ID}`,
+      `finish offboarding ${FLIGHT_ID}`,
+    ]);
+  });
+
+  it('waits before trying to finish offboarding again when the API refuses', async () => {
+    const { automation, calls, warnings, gsx, clock, lifecycle } = setup();
+    automation.setSettings(ALL_ON);
+    automation.setFlight({ id: FLIGHT_ID, status: 'offboarding_started' });
+    gsx.running = [service('deboarding', 'completed')];
+    lifecycle.fail = new Error('finish-offboarding failed with 503');
+
+    await automation.evaluate();
+    await automation.evaluate();
+
+    expect(calls).toHaveLength(1);
+    expect(warnings).toEqual([
+      'could not finish offboarding from GSX: finish-offboarding failed with 503',
+    ]);
+
+    lifecycle.fail = null;
+    clock.now += RETRY_AFTER_MS;
+    await automation.evaluate();
+
+    expect(calls).toHaveLength(2);
   });
 
   it('starts it once, although GSX keeps reporting it before the status catches up', async () => {

@@ -145,7 +145,7 @@ async function bootstrap(): Promise<void> {
   const groundFeed = new GroundServicesFeed(status, logger.child('gsx'));
   const gsxAutomation = new GsxAutomation(
     api,
-    () => groundFeed.running(),
+    () => groundFeed.services(),
     logger.child('gsx'),
   );
 
