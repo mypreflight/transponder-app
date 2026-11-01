@@ -19,6 +19,7 @@ import { Logger } from '../infrastructure/logger';
 import type { Presence, PresenceWriter } from '../application/ports/presence';
 import { GsxClient } from '../infrastructure/gsx/client';
 import { GroundServicesFeed } from '../application/ground-services.feed';
+import { GsxAutomation } from '../application/gsx-automation';
 import boarding from '../infrastructure/gsx/fixtures/services-boarding.json';
 
 const FLIGHT_ID = '0f0f6b04-9a5f-4e6c-9c4e-1d2f0f38a3b1';
@@ -626,6 +627,135 @@ describe('ADS-B service integration', () => {
 
     expect(status.snapshot().publishedCount).toBe(1);
     expect(status.snapshot().droppedCount).toBe(1);
+  });
+});
+
+describe('starting boarding when GSX reports it', () => {
+  const START_BOARDING = `/api/v1/flight/${FLIGHT_ID}/start-boarding`;
+
+  let api: StubService;
+  let settingsAnswer: { status: number; body?: unknown };
+
+  beforeEach(async () => {
+    settingsAnswer = {
+      status: 200,
+      body: {
+        integrationEnabled: true,
+        autoBoardingEnabled: true,
+        autoDeboardingEnabled: true,
+      },
+    };
+    api = new StubService({
+      'POST /api/v1/auth/sign-in': () => ({
+        status: 200,
+        body: { accessToken: 'access-1', refreshToken: 'refresh-1' },
+      }),
+      'GET /api/v1/user/me/gsx-settings': () => settingsAnswer,
+      [`POST ${START_BOARDING}`]: () => ({ status: 204 }),
+    });
+
+    await api.start();
+  });
+
+  afterEach(async () => {
+    await api.stop();
+  });
+
+  const fly = async (): Promise<void> => {
+    const flightTracker = new FlightTrackerClient(
+      api.baseUrl,
+      new InMemoryTokenStore(),
+    );
+    await flightTracker.signIn('pilot@example.com', 'P@$$w0rd');
+
+    const logger = new Logger('error', null, 'test', () => undefined);
+    const feed = new GroundServicesFeed(new StatusRegistry(), logger);
+    const automation = new GsxAutomation(
+      flightTracker,
+      () => feed.running(),
+      logger,
+    );
+    automation.setFlight({ id: FLIGHT_ID, status: 'checked_in' });
+    automation.setSettings(await flightTracker.getGsxSettings());
+
+    const controller = new AbortController();
+    const evaluations: Promise<void>[] = [];
+
+    await new GsxClient(
+      {
+        host: '127.0.0.1',
+        port: 8744,
+        helloTimeoutMs: 20,
+        subscribeTimeoutMs: 20,
+        open: () => {
+          const socket = new StubGsx();
+
+          queueMicrotask(() => {
+            socket.hello();
+            setImmediate(() => {
+              socket.push({ v: 1, type: 'snapshot', services: boarding.value });
+              setImmediate(() => socket.close());
+            });
+          });
+
+          return socket;
+        },
+        sleep: () => {
+          controller.abort();
+
+          return Promise.resolve();
+        },
+      },
+      {
+        onStatus: (state) => feed.setStatus(state),
+        onServices: (services) => {
+          feed.accept(services);
+          evaluations.push(automation.evaluate());
+        },
+        onStand: (stand) => feed.setStand(stand),
+      },
+    ).run(controller.signal);
+
+    await Promise.all(evaluations);
+  };
+
+  it('tells the API that GSX started it, once', async () => {
+    await fly();
+
+    const requests = api.requestsTo(START_BOARDING);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.authorization).toBe('Bearer access-1');
+    expect(JSON.parse(requests[0]?.body ?? '')).toEqual({ source: 'gsx' });
+  });
+
+  it('calls nothing while the pilot has automatic boarding off', async () => {
+    settingsAnswer = {
+      status: 200,
+      body: {
+        integrationEnabled: true,
+        autoBoardingEnabled: false,
+        autoDeboardingEnabled: true,
+      },
+    };
+
+    await fly();
+
+    expect(api.requestsTo(START_BOARDING)).toHaveLength(0);
+  });
+
+  it('reads an unexpected settings answer as off', async () => {
+    settingsAnswer = { status: 200, body: { integrationEnabled: 'yes' } };
+
+    await fly();
+
+    expect(api.requestsTo(START_BOARDING)).toHaveLength(0);
+  });
+
+  it('surfaces an API too old to have the settings, for the caller to treat as off', async () => {
+    settingsAnswer = { status: 404 };
+
+    await expect(fly()).rejects.toThrow('failed with 404');
   });
 });
 

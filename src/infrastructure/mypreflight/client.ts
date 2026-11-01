@@ -1,3 +1,4 @@
+import type { FlightLifecycle } from '../../application/ports/flight-lifecycle';
 import type {
   Presence,
   PresenceSource,
@@ -7,6 +8,7 @@ import {
   SessionExpiredError,
 } from '../../application/ports/session';
 import { type FlightStatus, toFlightStatus } from '../../domain/flight-status';
+import type { GsxSettings } from '../../domain/gsx-automation';
 import type { TokenStore } from './token-store';
 
 export type Airport = {
@@ -57,7 +59,7 @@ const DEPARTURE = 'departure';
 
 const DESTINATION = 'destination';
 
-export class FlightTrackerClient implements PresenceSource {
+export class FlightTrackerClient implements PresenceSource, FlightLifecycle {
   private accessToken: string | null = null;
   private accessTokenExpiresAt = 0;
 
@@ -206,6 +208,40 @@ export class FlightTrackerClient implements PresenceSource {
     return (await response.json()) as Presence;
   }
 
+  async getGsxSettings(): Promise<GsxSettings> {
+    const settings = (await this.get('/api/v1/user/me/gsx-settings')) as {
+      integrationEnabled?: unknown;
+      autoBoardingEnabled?: unknown;
+      autoDeboardingEnabled?: unknown;
+    };
+
+    return {
+      integrationEnabled: settings.integrationEnabled === true,
+      autoBoardingEnabled: settings.autoBoardingEnabled === true,
+      autoDeboardingEnabled: settings.autoDeboardingEnabled === true,
+    };
+  }
+
+  startBoarding(flightId: string): Promise<void> {
+    return this.startFromGsx(`/api/v1/flight/${flightId}/start-boarding`);
+  }
+
+  startOffboarding(flightId: string): Promise<void> {
+    return this.startFromGsx(`/api/v1/flight/${flightId}/start-offboarding`);
+  }
+
+  private async startFromGsx(path: string): Promise<void> {
+    const response = await this.authorizedRequest(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'gsx' }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`request to ${path} failed with ${response.status}`);
+    }
+  }
+
   private async get(path: string): Promise<unknown> {
     const response = await this.authorizedRequest(path);
 
@@ -216,12 +252,22 @@ export class FlightTrackerClient implements PresenceSource {
     return response.json();
   }
 
-  private async authorizedRequest(path: string): Promise<Response> {
+  private async authorizedRequest(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
     await this.ensureAccessToken();
 
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-    });
+    const send = (): Promise<Response> =>
+      this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          ...init.headers,
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+
+    const response = await send();
 
     if (response.status !== 401) {
       return response;
@@ -230,9 +276,7 @@ export class FlightTrackerClient implements PresenceSource {
     this.accessToken = null;
     await this.ensureAccessToken();
 
-    return this.fetchImpl(`${this.baseUrl}${path}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-    });
+    return send();
   }
 
   private async ensureAccessToken(): Promise<void> {
