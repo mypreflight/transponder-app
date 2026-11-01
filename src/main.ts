@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './infrastructure/config/config';
 import { envFilePaths, loadEnvFiles } from './infrastructure/config/env-file';
@@ -26,10 +27,16 @@ import {
   uniquePath,
 } from './infrastructure/platform/downloads';
 import { secretStoreFor } from './infrastructure/platform/secret-store';
+import { SystemBrowser } from './infrastructure/platform/browser';
 import type { DownloadArea } from './application/ports/downloads';
 import { Downloader } from './infrastructure/github/downloader';
 import { Updater } from './application/updater';
-import { promptForSignIn } from './application/sign-in';
+import {
+  type BrowserSignIn,
+  promptForSignIn,
+  SIGN_IN_FAULTS,
+  signInThroughBrowser,
+} from './application/sign-in';
 import { isUpdateAvailable, type Release } from './domain/release';
 import { ReleaseClient } from './infrastructure/github/release.client';
 import {
@@ -105,6 +112,12 @@ async function bootstrap(): Promise<void> {
   const tokenStore = tokenStoreFor(storage);
 
   const api = new FlightTrackerClient(config.apiBaseUrl, tokenStore);
+  const browserSignIn: BrowserSignIn = {
+    api,
+    browser: new SystemBrowser(),
+    logger,
+    deviceName: hostname(),
+  };
 
   const adsbToken = process.env.ADSB_CLIENT_TOKEN ?? '';
   const adsb = new AdsbClient(config.adsbBaseUrl, adsbToken);
@@ -149,12 +162,11 @@ async function bootstrap(): Promise<void> {
     logger.child('gsx'),
   );
 
-  if ((await tokenStore.read()) === null) {
+  if ((await api.storedSession()) === null) {
     if (process.stdin.isTTY) {
       const signedIn = await promptForSignIn(
-        api,
+        browserSignIn,
         new ConsolePrompt(process.stdin, process.stdout),
-        logger,
       );
 
       if (!signedIn) {
@@ -323,27 +335,49 @@ async function bootstrap(): Promise<void> {
         )
       : null;
 
-  const signIn = (email: string, password: string): void => {
-    void api.signIn(email, password).then(
-      async () => {
-        logger.info(`signed in as ${email}`);
+  let signingIn: AbortController | null = null;
+
+  const signIn = (): void => {
+    if (signingIn !== null) {
+      return;
+    }
+
+    const controller = new AbortController();
+    signingIn = controller;
+
+    void signInThroughBrowser(
+      browserSignIn,
+      (code) => status.setSignIn(code),
+      controller.signal,
+    ).then(async (outcome) => {
+      signingIn = null;
+      status.setSignIn(null);
+
+      if (outcome === 'signed-in') {
         status.set('api', 'connected');
         status.setFault('api', null);
         dashboard?.revealLogs();
         await pollCurrentFlight();
-      },
-      (error: unknown) => {
-        status.set('api', 'unauthorised');
-        status.setFault('api', describeError(error));
-        logger.error(`sign-in failed: ${describeError(error)}`);
+
+        return;
+      }
+
+      status.set('api', 'unauthorised');
+      status.setFault('api', SIGN_IN_FAULTS[outcome]);
+
+      if (outcome !== 'cancelled') {
         dashboard?.revealLogs();
-      },
-    );
+      }
+    });
+  };
+
+  const cancelSignIn = (): void => {
+    signingIn?.abort();
   };
 
   const signOut = (): void => {
     void api.signOut().then(
-      () => {
+      (revoked) => {
         status.set('api', 'unauthorised');
         status.setFault('api', 'signed out; press s to sign in again');
         status.setCrew(null);
@@ -351,6 +385,13 @@ async function bootstrap(): Promise<void> {
         applyCallsign(null);
         applySchedule(null);
         logger.info('signed out: press s to sign in again');
+
+        if (!revoked) {
+          logger.warn(
+            'MyPreflight could not be reached, so the session was only forgotten on this PC',
+          );
+        }
+
         dashboard?.revealLogs();
       },
       (error: unknown) => {
@@ -443,6 +484,7 @@ async function bootstrap(): Promise<void> {
       onQuit: () => void shutdown(),
       onCallsign: overrideCallsign,
       onSignIn: signIn,
+      onCancelSignIn: cancelSignIn,
       onSignOut: signOut,
       onTransmit: toggleTransmitting,
       onRefresh: refreshCurrentFlight,

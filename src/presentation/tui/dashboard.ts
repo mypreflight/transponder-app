@@ -17,14 +17,14 @@ const ESCAPE = '\u001b';
 const ENTER = ['\r', '\n'];
 const BACKSPACE = ['\u0008', '\u007f'];
 const MAX_CALLSIGN = 12;
-const MAX_CREDENTIAL = 128;
 
 export type Columns = () => number;
 
 export type DashboardHandlers = {
   onQuit: () => void;
   onCallsign: (callsign: string | null) => void;
-  onSignIn: (email: string, password: string) => void;
+  onSignIn: () => void;
+  onCancelSignIn: () => void;
   onSignOut: () => void;
   onTransmit: () => void;
   onRefresh: () => void;
@@ -35,6 +35,7 @@ const IGNORE: DashboardHandlers = {
   onQuit: () => undefined,
   onCallsign: () => undefined,
   onSignIn: () => undefined,
+  onCancelSignIn: () => undefined,
   onSignOut: () => undefined,
   onTransmit: () => undefined,
   onRefresh: () => undefined,
@@ -44,7 +45,6 @@ const IGNORE: DashboardHandlers = {
 type Field = {
   label: string;
   hint: string;
-  masked: boolean;
   maxLength: number;
   submit: (value: string) => void;
 };
@@ -138,7 +138,7 @@ export class Dashboard {
 
     return {
       label: field.label,
-      value: field.masked ? '*'.repeat(this.draft.length) : this.draft,
+      value: this.draft,
       hint: field.hint,
     };
   }
@@ -153,31 +153,8 @@ export class Dashboard {
     this.ask({
       label: 'callsign',
       hint: 'enter to set · empty follows the flight · esc cancels',
-      masked: false,
       maxLength: MAX_CALLSIGN,
       submit: (typed) => this.handlers.onCallsign(typed === '' ? null : typed),
-    });
-  }
-
-  private askSignIn(): void {
-    this.ask({
-      label: 'email',
-      hint: 'enter for the password · esc cancels',
-      masked: false,
-      maxLength: MAX_CREDENTIAL,
-      submit: (email) => {
-        if (email === '') {
-          return;
-        }
-
-        this.ask({
-          label: 'password',
-          hint: 'enter signs in · esc cancels',
-          masked: true,
-          maxLength: MAX_CREDENTIAL,
-          submit: (password) => this.handlers.onSignIn(email, password),
-        });
-      },
     });
   }
 
@@ -185,7 +162,10 @@ export class Dashboard {
     const status = this.status.snapshot();
 
     if (status.crew === null) {
-      this.askSignIn();
+      if (status.signIn === null) {
+        this.handlers.onSignIn();
+        this.render();
+      }
 
       return;
     }
@@ -221,6 +201,15 @@ export class Dashboard {
   }
 
   private command(character: string): void {
+    const signingIn = this.status.snapshot().signIn !== null;
+
+    if (signingIn && (character === ESCAPE || character === CANCEL)) {
+      this.handlers.onCancelSignIn();
+      this.render();
+
+      return;
+    }
+
     if (character === CANCEL) {
       this.handlers.onQuit();
 
@@ -291,7 +280,7 @@ export class Dashboard {
 
     if (ENTER.includes(character)) {
       const field = this.field;
-      const typed = field?.masked === true ? this.draft : this.draft.trim();
+      const typed = this.draft.trim();
 
       this.field = null;
       this.draft = '';

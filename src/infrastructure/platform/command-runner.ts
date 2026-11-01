@@ -10,12 +10,18 @@ export type CommandRunner = (
   args: string[],
 ) => Promise<CommandResult>;
 
-export const runCommand: CommandRunner = (file, args) =>
-  new Promise((resolve) => {
-    execFile(file, args, { windowsHide: true }, (error, stdout) => {
-      resolve({
-        stdout: stdout.toString().trim(),
-        status: error === null ? 'ok' : 'failed',
+function runner(windowsHide: boolean): CommandRunner {
+  return (file, args) =>
+    new Promise((resolve) => {
+      execFile(file, args, { windowsHide }, (error, stdout) => {
+        resolve({
+          stdout: stdout.toString().trim(),
+          status: error === null ? 'ok' : 'failed',
+        });
       });
     });
-  });
+}
+
+export const runCommand: CommandRunner = runner(true);
+
+export const runVisibleCommand: CommandRunner = runner(false);

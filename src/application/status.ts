@@ -1,4 +1,5 @@
 import type { GroundService } from '../domain/ground-services';
+import type { SignInCode } from './ports/device-sign-in';
 import type { GroundHandlingStatus, Stand } from './ports/ground-services';
 
 export type ConnectionName = 'simulator' | 'discord' | 'adsb' | 'api';
@@ -45,6 +46,7 @@ export type StatusSnapshot = {
   update: UpdateStatus;
   storageFault: string | null;
   crew: Crew | null;
+  signIn: SignInCode | null;
   service: CurrentService | null;
   callsign: string | null;
   aircraftIdentifier: string | null;
@@ -88,6 +90,7 @@ export class StatusRegistry {
   private update: UpdateStatus = { phase: 'idle' };
   private storageFault: string | null = null;
   private crew: Crew | null = null;
+  private signIn: SignInCode | null = null;
   private service: CurrentService | null = null;
   private callsign: string | null = null;
   private aircraftIdentifier: string | null = null;
@@ -135,6 +138,10 @@ export class StatusRegistry {
 
   setCrew(crew: Crew | null): void {
     this.crew = crew;
+  }
+
+  setSignIn(code: SignInCode | null): void {
+    this.signIn = code;
   }
 
   setService(service: CurrentService | null): void {
@@ -199,6 +206,7 @@ export class StatusRegistry {
       update: this.update,
       storageFault: this.storageFault,
       crew: this.crew,
+      signIn: this.signIn,
       service: this.service,
       callsign: this.callsign,
       aircraftIdentifier: this.aircraftIdentifier,

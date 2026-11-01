@@ -12,7 +12,7 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
 const SECRET_PATTERNS: RegExp[] = [
   /(Bearer\s+)[A-Za-z0-9._-]+/gi,
-  /("?(?:password|accessToken|refreshToken|token)"?\s*[:=]\s*"?)[^",\s}]+/gi,
+  /("?(?:password|accessToken|refreshToken|deviceCode|token)"?\s*[:=]\s*"?)[^",\s}]+/gi,
 ];
 
 export function redact(message: string): string {

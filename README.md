@@ -54,7 +54,8 @@ No installer, nothing to configure.
 1. Download `mypreflight-transponder.exe` from the [latest release][release-url].
 2. Put it in a folder of its own.
 3. Start the simulator, and Discord if you use it.
-4. Start the app by double-click. Enter your MyPreflight credentials.
+4. Start the app by double-click. It opens MyPreflight in your browser: sign in
+   there and approve the code the app shows.
 5. Your flight is going to be tracked automatically!
 
 ### Portable, and it stays that way
@@ -71,8 +72,8 @@ directory you happen to launch it from:
 Nothing goes to `%APPDATA%`, nothing goes into the registry, no service is
 registered and no shortcut is created. Deleting the folder uninstalls the app.
 Carry the folder on a stick if you like; the session is the one thing that does
-not travel, because DPAPI ties it to the Windows account that signed in, so the
-app simply asks for the password again on a different machine.
+not travel, because DPAPI ties it to the Windows account that signed in, so on a
+different machine the app simply asks you to sign in again.
 
 If the folder cannot be written to — `C:\Program Files`, a read-only stick, a
 locked share — the app says so on the dashboard and runs anyway, without a log
@@ -117,6 +118,31 @@ GSX is working your aircraft.
 │ call:     11:30:30z       ││                                               │
 ╰───────────────────────────╯╰───────────────────────────────────────────────╯
 ```
+
+### Signing in
+
+The app signs in through your browser, with whatever you use on the website:
+your password, Google or Discord. When it has no session, it shows a short code
+and opens the MyPreflight page for it:
+
+```
+Sign in to MyPreflight in your browser.
+
+  Open  https://mypreflight.io/activate
+  Code  BCDF-GHJK
+
+Approve only if the browser shows the same code. Ctrl+C cancels.
+```
+
+Check the page shows the same code, then approve. The app picks the session up
+within a few seconds and never sees your password. If the browser does not open,
+go to the address yourself and enter the code. A code lasts ten minutes; when it
+runs out, press Enter for a new one.
+
+Once signed in, the app keeps the session in the Windows credential store and
+renews it on its own. Signing out with `s` ends the session on MyPreflight too.
+If the session ever ends, for example after you change your password, the
+dashboard says so and `s` starts a new browser sign-in.
 
 ### Ground services, if you have GSX
 
@@ -175,14 +201,15 @@ touchdown are always published on the second they happen.
 
 ### Keys
 
-| Key | What it does                                                    |
-|-----|-----------------------------------------------------------------|
-| `s` | sign in, or sign out — refused while the transponder transmits  |
-| `t` | switch the transponder between `MODE C` and `STBY` by hand      |
-| `c` | publish under a callsign you type, rather than the flight's     |
-| `r` | read the current flight again, without waiting for the poll     |
-| `d` | show the log                                                    |
-| `u` | download a newer release, when there is one                     |
+| Key   | What it does                                                                      |
+|-------|-----------------------------------------------------------------------------------|
+| `s`   | sign in through the browser, or sign out; refused while the transponder transmits |
+| `esc` | stop waiting for a browser sign-in                                                |
+| `t`   | switch the transponder between `MODE C` and `STBY` by hand                        |
+| `c`   | publish under a callsign you type, rather than the flight's                       |
+| `r`   | read the current flight again, without waiting for the poll                       |
+| `d`   | show the log                                                                      |
+| `u`   | download a newer release, when there is one                                       |
 
 ## Development
 
@@ -226,7 +253,12 @@ npm start          # needs the environment in .env.example
 npm run build:exe  # single Windows executable, needs bun
 
 npx ts-node src/main.ts --print-frame   # the dashboard, drawn without a simulator
+E2E_API_BASE_URL=http://localhost npm test -- -t 'running MyPreflight API'
 ```
+
+The last line runs the sign-in end to end against a MyPreflight API you have
+running locally with its seed data: it approves its own code as the seeded cabin
+crew user. Without `E2E_API_BASE_URL` those tests are skipped.
 
 Under `ts-node` the app has no executable to sit beside, so it keeps its state
 in the working directory. `DATA_DIR` overrides that in either case, and expands
