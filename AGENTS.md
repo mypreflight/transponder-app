@@ -23,4 +23,4 @@ Keep this short. Anything shared between repos belongs in the knowledge base.
 - Layers: `domain/` → `application/` (ports) → `infrastructure/` and `presentation/`. Imports run downward only; `main.ts` wires everything.
 - Pilots run old versions for a long time. Never change what the app sends in a way the API or the receiver can't still accept.
 
-When your change alters product behaviour, also open a PR to the knowledge base updating the matching file.
+When your change alters product behaviour, also open a PR to the knowledge base updating the matching file. When it ships something a pilot will notice, also open a PR to [mypreflight/landing](https://github.com/mypreflight/landing) adding a changelog entry with before and after screenshots; that repo's `AGENTS.md`, under "Changelog", says how.
