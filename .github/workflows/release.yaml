@@ -15,8 +15,8 @@ jobs:
         uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' # v7.0.1
       - name: 'Release and push git tag'
         run: "git tag $(jq -r '.version' package.json) && git push --tags"
-      - name: 'Create a GitHub release'
-        run: "gh release create $(jq -r '.version' package.json) --generate-notes"
+      - name: 'Create a draft GitHub release'
+        run: "gh release create $(jq -r '.version' package.json) --draft --generate-notes"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   executable:
@@ -52,8 +52,13 @@ jobs:
       - name: 'Check the tray icon reaches the notification area'
         shell: 'pwsh'
         run: './scripts/check-tray.ps1'
-      - name: 'Attach the executable to the GitHub release'
+      - name: 'Attach the executable to the draft release'
         shell: 'bash'
         run: "gh release upload $(jq -r '.version' package.json) dist/mypreflight-transponder.exe"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 'Publish the release'
+        shell: 'bash'
+        run: "gh release edit $(jq -r '.version' package.json) --draft=false --latest"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
