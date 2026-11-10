@@ -1,6 +1,6 @@
 {
   "name": "transponder-app",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "homepage": "https://mypreflight.io",
   "author": "mypreflight",
@@ -40,7 +40,8 @@
     "node": ">=26"
   },
   "overrides": {
-    "minimatch": "^11.0.4"
+    "minimatch": "^11.0.4",
+    "glob@>=9.0.0 <14.0.2": "^14.0.4"
   },
   "allowScripts": {
     "fsevents@2.3.3": true,
