@@ -1,6 +1,6 @@
 {
   "name": "transponder-app",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "private": true,
   "homepage": "https://mypreflight.io",
   "author": "mypreflight",
@@ -27,7 +27,7 @@
     "node-simconnect": "^4.2.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.7",
+    "@biomejs/biome": "2.6.8",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.6.6",
     "jest": "^30.5.2",
